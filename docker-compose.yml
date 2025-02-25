@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  stemgraph_api:
+    image: stemgraph_api:v1
+    ports:
+      - "80:80"  # Adjust the port mapping as needed
+    secrets:
+      - STEMgraph_user
+      - STEMgraph_pw
+      - STEMgraph_write_access
+    deploy:
+      replicas: 1
+
+secrets:
+  STEMgraph_user:
+    external: true
+  STEMgraph_pw:
+    external: true
+  STEMgraph_write_access:
+    external: true
+
