@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import List, Dict, Any
 
 import httpx
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 # Use Uvicorn's logging engine for consistent log formatting.
 logger = logging.getLogger("uvicorn.error")
@@ -16,33 +18,16 @@ logger = logging.getLogger("uvicorn.error")
 # --------------------------------------------------------------------------------
 # Utility function to read Docker secret files from /run/secrets/
 # --------------------------------------------------------------------------------
-def read_secret(secret_name: str) -> str:
-    """
-    Reads the content of a Docker secret file from the /run/secrets/ directory.
+load_dotenv()
 
-    Args:
-        secret_name (str): The name of the secret file (without the path).
-
-    Returns:
-        str: The secret value as a string (trimmed), or None if an error occurs.
-    """
-    secret_path = f"/run/secrets/{secret_name}"
-    try:
-        with open(secret_path, 'r') as file:
-            return file.read().strip()
-    except FileNotFoundError:
-        logger.error("Secret file %s not found.", secret_path)
-        return None
-    except Exception as e:
-        logger.error("Error reading secret file %s: %s", secret_path, e)
-        return None
+STEMgraph_user = os.environ.get("STEMgraph_user")
+STEMgraph_pw = os.environ.get("STEMgraph_pw")
+STEMgraph_write_access = os.environ.get("STEMgraph_write_access")
 
 # --------------------------------------------------------------------------------
 # Read Docker secrets and assign them to variables.
 # --------------------------------------------------------------------------------
-STEMgraph_user = read_secret("STEMgraph_user")
-STEMgraph_pw = read_secret("STEMgraph_pw")
-STEMgraph_write_access = read_secret("STEMgraph_write_access")
+
 
 # Use the write access secret as the API key for write operations.
 API_KEY = STEMgraph_write_access
