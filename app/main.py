@@ -2,7 +2,7 @@ import asyncio
 import os
 import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List
 
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -46,6 +46,31 @@ app.add_middleware(
 NEO4J_URL = "http://neo4j.boekelmann.net:7474/db/neo4j/tx/commit"
 NEO4J_AUTH = (STEMgraph_user, STEMgraph_pw)
 HEADERS = {"Content-Type": "application/json"}
+
+async def health_check():
+    """Performs a health check by querying Neo4j."""
+    query = {"statements": [{"statement": "RETURN 'OK' AS status"}]}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=query)
+            data = response.json()
+            if data["results"][0]["data"][0]["row"][0] == "OK":
+                logger.info("✅ Successfully connected to Neo4j.")
+                return True
+        except Exception as e:
+            logger.warning(f"⚠️ Health check failed: {e}")
+    return False
+
+@app.on_event("startup")
+async def wait_for_healthcheck():
+    """Retries the health check before allowing the API to start."""
+    logger.info("⏳ Waiting for Neo4j to become available...")
+    while not await health_check():
+        logger.warning("🔄 Retrying in 5 seconds...")
+        await asyncio.sleep(5)
+    logger.info("🚀 API is starting now.")
+
 
 # Pydantic model for adding nodes
 class NewNode(BaseModel):
@@ -180,3 +205,62 @@ async def health_check():
             logger.error("Health check failed: %s", e)
             raise HTTPException(status_code=500, detail="API cannot connect to Neo4j")
 
+@app.get("/builds_on_list/{uuid}")
+async def get_builds_on_list(uuid: str):
+    """Recursively retrieves all UUIDs a given node 'builds_on'."""
+    query = {
+        "statements": [
+            {
+                "statement": """
+                MATCH (n:Challenge {uuid: $uuid})-[:BUILDS_ON*]->(dependency)
+                RETURN DISTINCT dependency.uuid AS uuid
+                """,
+                "parameters": {"uuid": uuid}
+            }
+        ]
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=query)
+            data = response.json()
+            uuids = [entry["row"][0] for entry in data["results"][0]["data"]]
+
+            return JSONResponse(content={"uuid": uuid, "builds_on": uuids})
+        
+        except Exception as e:
+            logger.error("Error retrieving builds_on list: %s", e)
+            raise HTTPException(status_code=500, detail="Failed to retrieve builds_on list.")
+
+
+@app.get("/builds_on_tree/{uuid}")
+async def get_builds_on_tree(uuid: str):
+    """Recursively retrieves all UUIDs a given node 'builds_on' and returns them as a tree structure."""
+    query = {
+        "statements": [
+            {
+                "statement": """
+                MATCH path = (n:Challenge {uuid: $uuid})-[:BUILDS_ON*]->(dependency)
+                WITH collect(path) AS paths
+                CALL apoc.convert.toTree(paths) YIELD value
+                RETURN value
+                """,
+                "parameters": {"uuid": uuid}
+            }
+        ]
+    }
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=query)
+            data = response.json()
+
+            if not data["results"][0]["data"]:
+                return JSONResponse(content={"uuid": uuid, "builds_on_tree": {}})
+            
+            builds_on_tree = data["results"][0]["data"][0]["row"][0]
+            return JSONResponse(content={"uuid": uuid, "builds_on_tree": builds_on_tree})
+
+        except Exception as e:
+            logger.error("Error retrieving builds_on tree: %s", e)
+            raise HTTPException(status_code=500, detail="Failed to retrieve builds_on tree.")

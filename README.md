@@ -9,6 +9,7 @@ Provides endpoints for user interactions with the STEMgraph database, including:
 - Retrieving graph data
 - Fetching details of specific nodes
 - Creating new nodes with relationships
+- Fetching dependency information in both list and tree formats
 
 ### Security
 - Uses **Docker Secrets** to securely manage sensitive credentials.
@@ -20,6 +21,7 @@ Provides endpoints for user interactions with the STEMgraph database, including:
 - **Uvicorn** for running the API
 - **Neo4j** as the graph database
 - A background task periodically updates a local cache of the graph data.
+- A health check on startup ensures connectivity to Neo4j before the API starts.
 
 ## File Structure
 
@@ -69,7 +71,7 @@ When running in Docker, credentials are managed through Docker Secrets and do no
 
 1. **Build the Docker Image:**
    ```bash
-   docker build -t stemgraph_api:latest .
+   docker build -t stemgraph_api:v1 .
    ```
 
 2. **Create Docker Secrets:**
@@ -114,22 +116,45 @@ When running in Docker, credentials are managed through Docker Secrets and do no
       "builds_on": ["uuid-of-related-node"]
   }
   ```
-- **Curl Example:**
-  ```bash
-  curl -X POST http://<your-host>:80/add_node \
-    -H "Content-Type: application/json" \
-    -H "X-API-Key: your_api_key" \
-    -d '{
-          "name": "Example Node",
+
+### **GET `/builds_on_list/{uuid}`**
+- **Description:** Retrieves all UUIDs that a given node "builds_on" recursively and returns them as a flat list.
+- **Response Format:**
+  ```json
+  {
+      "uuid": "123e4567-e89b-12d3-a456-426614174000",
+      "builds_on": [
+          "abcdef12-3456-7890-abcd-ef1234567890",
+          "7890abcd-ef12-3456-7890-abcdef123456"
+      ]
+  }
+  ```
+
+### **GET `/builds_on_tree/{uuid}`**
+- **Description:** Retrieves all UUIDs that a given node "builds_on" recursively and returns them as a nested tree structure.
+- **Response Format:**
+  ```json
+  {
+      "uuid": "123e4567-e89b-12d3-a456-426614174000",
+      "builds_on_tree": {
           "uuid": "123e4567-e89b-12d3-a456-426614174000",
-          "repo_domain": "https://github.com/example/repo",
-          "description": "A sample project node",
-          "builds_on": []
-        }'
+          "children": [
+              {
+                  "uuid": "abcdef12-3456-7890-abcd-ef1234567890",
+                  "children": [
+                      {
+                          "uuid": "7890abcd-ef12-3456-7890-abcdef123456",
+                          "children": []
+                      }
+                  ]
+              }
+          ]
+      }
+  }
   ```
 
 ### **GET `/healthcheck`**
-- **Description:** Verifies API and Neo4j connectivity.
+- **Description:** Verifies API and Neo4j connectivity before allowing startup.
 - **Response:**
   ```json
   { "status": "API is running and connected to Neo4j" }
@@ -146,4 +171,3 @@ When running in Docker, credentials are managed through Docker Secrets and do no
 ## Author
 
 Created by [MaxClerkwell](https://x.com/MaxClerkwell)
-
