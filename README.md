@@ -1,129 +1,147 @@
 # STEMgraph API
 
-This project implements a FastAPI-based API for interacting with the STEMgraph database. The API is designed to allow regular users to perform specific actions on the database while securing sensitive data using Docker Secrets.
+This project implements a FastAPI-based API for interacting with the STEMgraph database. The API allows users to query graph data, retrieve node details, and add new nodes while ensuring security through Docker Secrets and API keys.
 
 ## Overview
 
-- **Use Case:**  
-  Provides endpoints for normal user interactions with the STEMgraph database, including retrieving graph data and creating new nodes.
+### Use Case
+Provides endpoints for user interactions with the STEMgraph database, including:
+- Retrieving graph data
+- Fetching details of specific nodes
+- Creating new nodes with relationships
 
-- **Security:**  
-  Uses Docker Secrets to securely handle sensitive information such as database credentials and API keys.  
-  Endpoints requiring write access are protected via an API key passed in the header (`X-API-Key`).
+### Security
+- Uses **Docker Secrets** to securely manage sensitive credentials.
+- Protects write-access endpoints with an API key passed in the `X-API-Key` header.
 
-- **Architecture:**  
-  - **FastAPI** is used as the web framework.  
-  - **Uvicorn's logging engine** is employed to ensure consistent log formatting.  
-  - A background task periodically updates a local cache of the graph data from a Neo4j database.
+### Architecture
+- **FastAPI** as the web framework
+- **Typer** to wrap the application execution
+- **Uvicorn** for running the API
+- **Neo4j** as the graph database
+- A background task periodically updates a local cache of the graph data.
 
 ## File Structure
 
-- **`app/main.py`**  
-  Contains the FastAPI application, API endpoints, background tasks, and functions to read Docker secrets.
-  
-- **`requirements.txt`**  
-  Lists all Python dependencies required by the application.
-
-- **`Dockerfile`**  
-  Defines the Docker image build instructions.
-
-- **`docker-compose.yml`**  
-  Provides the Docker Compose configuration to deploy the application as a service in Docker Swarm, using Docker Secrets.
+- **`app/main.py`** - Defines the FastAPI application, endpoints, and logic.
+- **`app/STEMgraph_API.py`** - Uses Typer to wrap the FastAPI application and handle CLI or Docker Secrets-based execution.
+- **`requirements.txt`** - Contains the dependencies required for running the API.
+- **`Dockerfile`** - Defines the containerized deployment.
+- **`docker-compose.yml`** - Configures Docker services, including Docker Secrets for sensitive credentials.
 
 ## Prerequisites
 
-- Docker installed.
-- Docker Swarm initialized (Docker Secrets only work in Swarm mode).
-- Docker Compose installed.
+- Python 3.12 installed (for local execution)
+- Docker installed (for containerized execution)
+- Docker Swarm initialized (for Docker Secrets functionality)
+- Docker Compose installed
 
-## Setup & Deployment
+## Running the API
 
-### 1. Build the Docker Image
+### **Running Locally**
 
-Navigate to the project root (where the `Dockerfile` is located) and run:
+1. **Create a virtual environment and activate it:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. **Run the API with credentials:**
+   ```bash
+   python app/STEMgraph_API.py --neo4j-user "<neo4j-user>" --neo4j-pw "<neo4j-pw>" --write-token "<write-token>"
+   ```
+4. **Test Neo4j connectivity before starting:**
+   ```bash
+   python app/STEMgraph_API.py --neo4j-user "<neo4j-user>" --neo4j-pw "<neo4j-pw>" --test
+   ```
+   If the connection is successful, it will print:
+   ```
+   ✅ Successfully connected to Neo4j.
+   ```
+   Otherwise, an error message will indicate the issue.
 
-```bash
-docker build -t stemgraph_api:v1 .
-```
+### **Running with Docker**
 
-This command builds the image using Python 3.12 and installs all necessary dependencies from `requirements.txt`.
+When running in Docker, credentials are managed through Docker Secrets and do not need to be passed via CLI.
 
-### 2. Configure Docker Secrets
+1. **Build the Docker Image:**
+   ```bash
+   docker build -t stemgraph_api:latest .
+   ```
 
-The required secrets are stored in the organization's Vaultwarden under **Admin-Büro/Dev-Ops**. Retrieve them from Vaultwarden and create the Docker Secrets manually. For example:
+2. **Create Docker Secrets:**
+   ```bash
+   echo "your_neo4j_username" | docker secret create STEMgraph_user -
+   echo "your_neo4j_password" | docker secret create STEMgraph_pw -
+   echo "your_api_key" | docker secret create STEMgraph_write_access -
+   ```
 
-```bash
-echo "your_neo4j_username" | docker secret create STEMgraph_user -
-echo "your_neo4j_password" | docker secret create STEMgraph_pw -
-echo "your_api_key" | docker secret create STEMgraph_write_access -
-```
+3. **Deploy with Docker Compose:**
+   ```bash
+   docker stack deploy --compose-file docker-compose.yml stemgraph_stack
+   ```
 
-These secrets will be available inside your container at `/run/secrets/<secret_name>`.
-
-### 3. Deploy the Stack Using Docker Compose
-
-Deploy your service with Docker Swarm using the provided `docker-compose.yml`:
-
-```bash
-docker stack deploy --compose-file docker-compose.yml stemgraph_stack
-```
-
-This command creates the stack named `stemgraph_stack` and deploys the `stemgraph_api` service with the secrets mounted.
-
-### 4. View Uvicorn Logs
-
-To see the output of Uvicorn (and thus your API logs), run:
-
-```bash
-docker service logs -f stemgraph_stack_stemgraph_api
-```
-
-This command streams logs from your service so you can monitor API activity and debug if necessary.
+4. **View logs:**
+   ```bash
+   docker service logs -f stemgraph_stack_stemgraph_api
+   ```
 
 ## API Endpoints
 
-### GET `/graph`
+### **GET `/graph`**
+- **Description:** Retrieves all nodes and edges from the Neo4j database.
+- **Response Format:** JSON with `nodes` and `edges` arrays.
 
-- **Description:**  
-  Retrieves the current graph cache, which contains nodes and edges fetched from the Neo4j database.
+### **GET `/get_detail/{identifier}`**
+- **Description:** Fetches details of a single node by ID, UUID, or name.
+- **Request Parameter:**
+  - `identifier`: Node ID, UUID, or name.
+- **Response Format:** JSON containing node details.
 
-- **Response:**  
-  JSON data suitable for visualization libraries (e.g., vis.js).
-
-### POST `/node`
-
-- **Description:**  
-  Creates a new node in the Neo4j database.
-
-- **Security:**  
-  Requires an API key via the `X-API-Key` header. The API key is read from the Docker secret `STEMgraph_write_access`.
-
-- **Request Payload Example:**
-
+### **POST `/add_node`** (Requires API Key)
+- **Description:** Creates a new node in Neo4j and establishes "Builds On" relationships.
+- **Security:** Requires an API key in the `X-API-Key` header.
+- **Request Body Example:**
   ```json
   {
       "name": "Example Node",
       "uuid": "123e4567-e89b-12d3-a456-426614174000",
-      "repo_link": "https://github.com/example/repo"
+      "repo_domain": "https://github.com/example/repo",
+      "description": "A sample project node",
+      "builds_on": ["uuid-of-related-node"]
   }
   ```
-
 - **Curl Example:**
-
   ```bash
-  curl -v -X POST http://<your-host>:80/node \
+  curl -X POST http://<your-host>:80/add_node \
     -H "Content-Type: application/json" \
     -H "X-API-Key: your_api_key" \
     -d '{
           "name": "Example Node",
           "uuid": "123e4567-e89b-12d3-a456-426614174000",
-          "repo_link": "https://github.com/example/repo"
+          "repo_domain": "https://github.com/example/repo",
+          "description": "A sample project node",
+          "builds_on": []
         }'
+  ```
+
+### **GET `/healthcheck`**
+- **Description:** Verifies API and Neo4j connectivity.
+- **Response:**
+  ```json
+  { "status": "API is running and connected to Neo4j" }
   ```
 
 ## Logging
 
-The application uses Uvicorn's logging engine (accessed via `logging.getLogger("uvicorn.error")`) for consistent output. Logs are written to STDOUT/STDERR, which can be viewed with Docker service logs.
+- The API uses Uvicorn's logging engine (`logging.getLogger("uvicorn.error")`).
+- Logs can be viewed via Docker using:
+  ```bash
+  docker service logs -f stemgraph_stack_stemgraph_api
+  ```
 
 ## Author
 
