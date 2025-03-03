@@ -1,7 +1,8 @@
 import asyncio
+import os
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import httpx
 from fastapi import FastAPI, Depends, HTTPException, status
@@ -10,265 +11,172 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 
-# Use Uvicorn's logging engine for consistent log formatting.
+# Logging setup
 logger = logging.getLogger("uvicorn.error")
 
-# --------------------------------------------------------------------------------
-# Utility function to read Docker secret files from /run/secrets/
-# --------------------------------------------------------------------------------
-def read_secret(secret_name: str) -> str:
-    """
-    Reads the content of a Docker secret file from the /run/secrets/ directory.
+# Read credentials from environment variables (set via CLI or Docker secrets)
+STEMgraph_user = os.getenv("STEMgraph_user")
+STEMgraph_pw = os.getenv("STEMgraph_pw")
+STEMgraph_write_access = os.getenv("STEMgraph_write_access")
 
-    Args:
-        secret_name (str): The name of the secret file (without the path).
-
-    Returns:
-        str: The secret value as a string (trimmed), or None if an error occurs.
-    """
-    secret_path = f"/run/secrets/{secret_name}"
-    try:
-        with open(secret_path, 'r') as file:
-            return file.read().strip()
-    except FileNotFoundError:
-        logger.error("Secret file %s not found.", secret_path)
-        return None
-    except Exception as e:
-        logger.error("Error reading secret file %s: %s", secret_path, e)
-        return None
-
-# --------------------------------------------------------------------------------
-# Read Docker secrets and assign them to variables.
-# --------------------------------------------------------------------------------
-STEMgraph_user = read_secret("STEMgraph_user")
-STEMgraph_pw = read_secret("STEMgraph_pw")
-STEMgraph_write_access = read_secret("STEMgraph_write_access")
-
-# Use the write access secret as the API key for write operations.
+# API key security setup
 API_KEY = STEMgraph_write_access
-
-# --------------------------------------------------------------------------------
-# FastAPI API key security setup.
-# --------------------------------------------------------------------------------
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
 
 def verify_api_key(api_key: str = Depends(api_key_header)):
-    """
-    Verifies that the provided API key matches the expected key.
-
-    Args:
-        api_key (str): API key from the request header.
-
-    Raises:
-        HTTPException: If the API key is invalid.
-    """
+    """Verifies the API key before processing requests."""
     if api_key != API_KEY:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key - Access denied",
         )
 
-# --------------------------------------------------------------------------------
-# Pydantic models for caching and new node input.
-# --------------------------------------------------------------------------------
-class Cache(BaseModel):
-    """
-    Represents a cache for the graph, containing nodes and edges.
-    """
-    nodes: List[Dict[str, Any]] = []
-    edges: List[Dict[str, Any]] = []
-
-    def print_cache(self):
-        """
-        Prints the current cache as a well-formatted JSON string.
-        """
-        logger.info("Updated Cache:")
-        logger.info(json.dumps(self.dict(), indent=4, ensure_ascii=False))
-
-class NewNode(BaseModel):
-    """
-    Represents the input model for creating a new node.
-    """
-    name: str
-    uuid: str
-    repo_link: str
-
-# Global cache object for storing graph data.
-graph_cache = Cache()
-
-# --------------------------------------------------------------------------------
-# FastAPI application setup with CORS middleware.
-# --------------------------------------------------------------------------------
+# FastAPI setup
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, restrict origins appropriately.
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --------------------------------------------------------------------------------
-# Neo4j database connection configuration.
-# --------------------------------------------------------------------------------
+# Neo4j connection settings
 NEO4J_URL = "http://neo4j.boekelmann.net:7474/db/neo4j/tx/commit"
 NEO4J_AUTH = (STEMgraph_user, STEMgraph_pw)
 HEADERS = {"Content-Type": "application/json"}
 
-# Predefined payloads for node and edge queries.
-NODE_QUERY_PAYLOAD = {
-    "statements": [
-        {
-            "statement": "MATCH (n) RETURN {node: n} AS node"
-        }
-    ]
-}
+# Pydantic model for adding nodes
+class NewNode(BaseModel):
+    name: str
+    uuid: str
+    repo_domain: str
+    description: str
+    builds_on: List[str] = []
 
-EDGE_QUERY_PAYLOAD = {
-    "statements": [
-        {
-            "statement": "MATCH (source)-[r]->(target) RETURN {from: id(source), type: type(r), to: id(target)} AS edge"
-        }
-    ]
-}
-
-# --------------------------------------------------------------------------------
-# Background task: update the graph cache periodically from Neo4j.
-# --------------------------------------------------------------------------------
-async def update_graph_cache():
-    """
-    Fetches nodes and edges from the Neo4j database and updates the global cache.
-    Uses try/except blocks to catch exceptions during HTTP requests and logs outcomes.
-    """
-    global graph_cache
-    async with httpx.AsyncClient() as client:
-        # Fetch nodes from Neo4j.
-        try:
-            response_nodes = await client.post(
-                NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=NODE_QUERY_PAYLOAD
-            )
-            nodes_data = response_nodes.json()
-            logger.info("Successfully fetched nodes from Neo4j.")
-        except Exception as e:
-            logger.error("Error fetching nodes from Neo4j: %s", e)
-            nodes_data = {}
-
-        # Fetch edges from Neo4j.
-        try:
-            response_edges = await client.post(
-                NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=EDGE_QUERY_PAYLOAD
-            )
-            edges_data = response_edges.json()
-            logger.info("Successfully fetched edges from Neo4j.")
-        except Exception as e:
-            logger.error("Error fetching edges from Neo4j: %s", e)
-            edges_data = {}
-
-        # Process nodes: transform Neo4j node data into a simplified format.
-        new_nodes = []
-        if nodes_data.get("results"):
-            neo4j_nodes = nodes_data["results"][0].get("data", [])
-            for entry in neo4j_nodes:
-                row = entry.get("row", [])
-                meta = entry.get("meta", [])
-                meta_entry = meta[0] if meta and len(meta) > 0 else {}
-                if meta_entry.get("deleted", False):
-                    continue
-                node_properties = row[0].get("node", {}) if row and isinstance(row, list) and len(row) > 0 else {}
-                new_nodes.append({
-                    "id": meta_entry.get("id", "unknown"),
-                    "uuid": node_properties.get("uuid", "unknown"),
-                    "label": node_properties.get("name", "unknown"),
-                    "repo_link": node_properties.get("repo_link", "unknown")
-                })
-        graph_cache.nodes = new_nodes
-
-        # Process edges: transform Neo4j edge data into a format suitable for visualization.
-        new_edges = []
-        if edges_data.get("results"):
-            neo4j_edges = edges_data["results"][0].get("data", [])
-            for entry in neo4j_edges:
-                meta = entry.get("meta", [])
-                if any(m and m.get("deleted", False) for m in meta):
-                    continue
-                row = entry.get("row", [])
-                if row and isinstance(row, list) and len(row) > 0:
-                    edge_props = row[0]
-                    new_edges.append({
-                        "from": edge_props.get("from", "unknown"),
-                        "to": edge_props.get("to", "unknown"),
-                        "label": edge_props.get("type", "unknown"),
-                        "arrows": "to"  # Indicates an arrow pointing towards the target node.
-                    })
-        graph_cache.edges = new_edges
-        logger.info("Graph cache updated successfully.")
-
-async def periodic_update_task():
-    """
-    Background task that updates the graph cache every 60 seconds.
-    """
-    while True:
-        await update_graph_cache()
-        await asyncio.sleep(60)
-
-# --------------------------------------------------------------------------------
-# Startup event: Launch the periodic background update task.
-# --------------------------------------------------------------------------------
-@app.on_event("startup")
-async def startup_event():
-    """
-    Startup event that triggers the background task to update the cache.
-    """
-    asyncio.create_task(periodic_update_task())
-    logger.info("Background task for updating graph cache started.")
-
-# --------------------------------------------------------------------------------
-# API Endpoints
-# --------------------------------------------------------------------------------
 @app.get("/graph")
 async def get_graph():
-    """
-    GET endpoint to retrieve the current graph cache.
-    """
-    try:
-        logger.info("Graph cache retrieved successfully.")
-        return JSONResponse(content=graph_cache.dict())
-    except Exception as e:
-        logger.error("Error retrieving graph cache: %s", e)
-        raise HTTPException(status_code=500, detail="Error retrieving graph cache.")
+    """Retrieves all nodes and edges from Neo4j."""
+    node_query = {
+        "statements": [{"statement": "MATCH (n) RETURN {id: id(n), uuid: n.uuid, label: n.name, repo_link: n.repo_domain} AS node"}]
+    }
+    edge_query = {
+        "statements": [{"statement": "MATCH (a)-[r]->(b) RETURN {from: id(a), to: id(b), type: type(r)} AS edge"}]
+    }
 
-@app.post("/node", dependencies=[Depends(verify_api_key)])
-async def create_node(new_node: NewNode):
-    """
-    POST endpoint to create a new node in the Neo4j database.
-    """
-    cypher_query = """
-    CREATE (n:Topic {name: $name, uuid: $uuid, repo_link: $repo_link})
-    RETURN id(n) AS id
-    """
-    payload = {
+    async with httpx.AsyncClient() as client:
+        try:
+            # Fetch nodes
+            response_nodes = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=node_query)
+            nodes_data = response_nodes.json()
+            nodes = [entry["row"][0] for entry in nodes_data["results"][0]["data"]]
+
+            # Fetch edges
+            response_edges = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=edge_query)
+            edges_data = response_edges.json()
+            edges = [entry["row"][0] for entry in edges_data["results"][0]["data"]]
+
+            return JSONResponse(content={"nodes": nodes, "edges": edges})
+        
+        except Exception as e:
+            logger.error("Error retrieving graph data: %s", e)
+            raise HTTPException(status_code=500, detail="Failed to retrieve graph data.")
+
+@app.get("/get_detail/{identifier}")
+async def get_node_detail(identifier: str):
+    """Fetches a single node by ID, UUID, or name."""
+    query = {
         "statements": [
             {
-                "statement": cypher_query,
-                "parameters": {
-                    "name": new_node.name,
-                    "uuid": new_node.uuid,
-                    "repo_link": new_node.repo_link
-                }
+                "statement": """
+                MATCH (n)
+                WHERE id(n) = toInteger($identifier) OR n.uuid = $identifier OR n.name = $identifier
+                RETURN {id: id(n), uuid: n.uuid, label: n.name, repo_link: n.repo_domain, description: n.description} AS node
+                """,
+                "parameters": {"identifier": identifier}
             }
         ]
     }
+
     async with httpx.AsyncClient() as client:
         try:
+            response = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=query)
+            data = response.json()
+            if not data["results"][0]["data"]:
+                raise HTTPException(status_code=404, detail="Node not found")
+
+            return JSONResponse(content=data["results"][0]["data"][0]["row"][0])
+
+        except Exception as e:
+            logger.error("Error retrieving node: %s", e)
+            raise HTTPException(status_code=500, detail="Failed to retrieve node.")
+
+@app.post("/add_node", dependencies=[Depends(verify_api_key)])
+async def add_node(new_node: NewNode):
+    """Creates a new node in Neo4j and connects it to existing nodes via 'Builds On' relationships."""
+    
+    # Query to create the main node
+    create_node_query = """
+    MERGE (n:Challenge {uuid: $uuid})
+    SET n.name = $name, n.repo_domain = $repo_domain, n.description = $description
+    RETURN id(n) AS id
+    """
+
+    # Query to establish "Builds On" relationships
+    builds_on_query = """
+    UNWIND $builds_on AS builds_on_uuid
+    MERGE (n:Challenge {uuid: $uuid})
+    MERGE (b:Challenge {uuid: builds_on_uuid})
+    MERGE (n)-[:BUILDS_ON]->(b)
+    """
+
+    async with httpx.AsyncClient() as client:
+        try:
+            # Send request to create the node
             response = await client.post(
-                NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=payload
+                NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH,
+                json={"statements": [{"statement": create_node_query, "parameters": {
+                    "uuid": new_node.uuid,
+                    "name": new_node.name,
+                    "repo_domain": new_node.repo_domain,
+                    "description": new_node.description
+                }}]}
             )
             data = response.json()
             new_id = data["results"][0]["data"][0]["row"][0]
-            logger.info("Node created successfully with id: %s", new_id)
+
+            # If there are "Builds On" relationships, create them
+            if new_node.builds_on:
+                await client.post(
+                    NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH,
+                    json={"statements": [{"statement": builds_on_query, "parameters": {
+                        "uuid": new_node.uuid,
+                        "builds_on": new_node.builds_on
+                    }}]}
+                )
+
         except Exception as e:
             logger.error("Error creating node in Neo4j: %s", e)
             raise HTTPException(status_code=500, detail=f"Failed to create node: {e}")
-    return JSONResponse(content={"id": new_id})
+
+    return JSONResponse(content={"id": new_id, "message": "Node created successfully."})
+
+@app.get("/healthcheck")
+async def health_check():
+    """Health check endpoint to verify API and Neo4j connectivity."""
+    query = {"statements": [{"statement": "RETURN 'OK' AS status"}]}
+
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(NEO4J_URL, headers=HEADERS, auth=NEO4J_AUTH, json=query)
+            data = response.json()
+            if data["results"][0]["data"][0]["row"][0] == "OK":
+                return JSONResponse(content={"status": "API is running and connected to Neo4j"})
+            else:
+                raise Exception("Unexpected response from Neo4j")
+
+        except Exception as e:
+            logger.error("Health check failed: %s", e)
+            raise HTTPException(status_code=500, detail="API cannot connect to Neo4j")
+
