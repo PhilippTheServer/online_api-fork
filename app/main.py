@@ -10,14 +10,19 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 # Logging setup
 logger = logging.getLogger("uvicorn.error")
 
 # Read credentials from environment variables (set via CLI or Docker secrets)
-STEMgraph_user = os.getenv("STEMgraph_user")
-STEMgraph_pw = os.getenv("STEMgraph_pw")
-STEMgraph_write_access = os.getenv("STEMgraph_write_access")
+STEMgraph_user = os.environ.get("STEMgraph_user")
+STEMgraph_pw = os.environ.get("STEMgraph_pw")
+STEMgraph_write_access = os.environ.get("STEMgraph_write_access")
 
 # API key security setup
 API_KEY = STEMgraph_write_access
